@@ -1,62 +1,112 @@
-// 使用 Rust + CUDA 進行 GPU 加速的 hash 計算範例
-// 本範例仿寫自 https://vaktibabat.github.io/posts/cudacracker/
-// 需求：
-// - CUDA 開發環境
-// - Rust crate: cust (https://github.com/dennis-hamester/cust)
-
-use cust::prelude::*;
+use clap::{Parser, ValueEnum};
 use std::error::Error;
+use std::fs;
+use std::path::PathBuf;
 
-// CUDA kernel (SHA256 hash 為例)
-const KERNEL_SRC: &str = r#"
-extern "C" __global__ void hash_kernel(const unsigned char* input, unsigned char* output, int len) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < len) {
-        // 這裡以簡單按位取反作為範例，實際請用 SHA256 實現
-        output[i] = ~input[i];
-    }
+#[derive(Parser, Debug)]
+#[command(author, version, about = "GPU hash calculator (Rust)", long_about = None)]
+struct Args {
+    /// Input file to hash
+    #[arg(short, long)]
+    input: PathBuf,
+
+    /// Hash algorithm (sha256/md5/...)
+    #[arg(short, long, default_value = "sha256")]
+    hash: String,
+
+    /// GPU backend (auto/cuda/opencl)
+    #[arg(short = 'g', long, default_value = "auto")]
+    gpu: GpuBackend,
 }
-"#;
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum GpuBackend {
+    Auto,
+    Cuda,
+    Opencl,
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // 初始化 CUDA
-    cust::init(cust::CudaFlags::empty())?;
-    let device = Device::get_device(0)?;
-    let ctx = Context::create_and_push(ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO, device)?;
+    let args = Args::parse();
 
-    // 載入 CUDA module
-    let module = Module::from_ptx(KERNEL_SRC, &[])?;
+    // 讀取檔案內容
+    let input = fs::read(&args.input)?;
+    println!("Loaded input file: {:?} ({} bytes)", args.input, input.len());
 
-    // 準備 kernel
-    let func = module.get_function("hash_kernel")?;
+    // 根據參數初始化 GPU
+    match args.gpu {
+        GpuBackend::Auto => {
+            // 先試 CUDA，再試 OpenCL
+            if try_cuda(&input, &args.hash)? {
+                return Ok(());
+            }
+            if try_opencl(&input, &args.hash)? {
+                return Ok(());
+            }
+            eprintln!("No supported GPU backend found (nVidia CUDA, AMD/INTEL OpenCL)!");
+            std::process::exit(1);
+        }
+        GpuBackend::Cuda => {
+            if !try_cuda(&input, &args.hash)? {
+                eprintln!("CUDA backend not available or failed!");
+                std::process::exit(1);
+            }
+        }
+        GpuBackend::Opencl => {
+            if !try_opencl(&input, &args.hash)? {
+                eprintln!("OpenCL backend (AMD/INTEL) not available or failed!");
+                std::process::exit(1);
+            }
+        }
+    }
+    Ok(())
+}
 
-    // 待 hash 的輸入資料
-    let input: Vec<u8> = b"hello, cuda hash!".to_vec();
-    let len = input.len();
-
-    // 分配 GPU 記憶體
-    let d_input = DeviceBuffer::from_slice(&input)?;
-    let mut d_output = DeviceBuffer::zeroed(len)?;
-
-    // 啟動 kernel
-    let block_size = 128;
-    let grid_size = (len as u32 + block_size - 1) / block_size;
-    unsafe {
-        launch!(
-            func<<<grid_size, block_size, 0, Stream::null()>>>(
-                d_input.as_device_ptr(),
-                d_output.as_device_ptr(),
-                len as i32
-            )
-        )?;
+fn try_cuda(input: &[u8], hash: &str) -> Result<bool, Box<dyn Error>> {
+    // 嘗試初始化 CUDA
+    match cust::init(cust::CudaFlags::empty()) {
+        Ok(_) => (),
+        Err(_) => {
+            println!("CUDA not available on this system.");
+            return Ok(false);
+        }
     }
 
-    // 從 GPU 取回結果
-    let mut result = vec![0u8; len];
-    d_output.copy_to(&mut result)?;
+    // 檢查至少有一個裝置
+    let device_count = cust::device::Device::num_devices()?;
+    if device_count == 0 {
+        println!("No CUDA device found.");
+        return Ok(false);
+    }
+    println!("Found {} CUDA device(s).", device_count);
 
-    println!("GPU hash (bitwise NOT sample): {:x?}", result);
+    // 只簡單做 hash 範例 (尚未實作 SHA256)
+    // 若要完整 SHA256 kernel 請參考 cudacracker 或 open-source CUDA SHA256 範例
 
-    // 實際應用請將 kernel 實作替換為 SHA256 算法
-    Ok(())
+    // ...（請填入 cust CUDA hash kernel 實作）
+    println!("CUDA backend hash computation not fully implemented (stub).");
+    Ok(true)
+}
+
+fn try_opencl(input: &[u8], hash: &str) -> Result<bool, Box<dyn Error>> {
+    // 嘗試初始化 OpenCL
+    #[cfg(feature = "opencl")]
+    {
+        use opencl3::platform::get_platforms;
+        let plats = get_platforms()?;
+        if plats.is_empty() {
+            println!("No OpenCL platforms found.");
+            return Ok(false);
+        }
+        println!("Found {} OpenCL platform(s).", plats.len());
+        // ...（可繼續查詢裝置型號與類型，選取 GPU/CPU 等）
+        // ...（請填入 OpenCL hash kernel 實作）
+        println!("OpenCL backend hash computation not fully implemented (stub).");
+        Ok(true)
+    }
+    #[cfg(not(feature = "opencl"))]
+    {
+        println!("OpenCL support not compiled in.");
+        Ok(false)
+    }
 }
