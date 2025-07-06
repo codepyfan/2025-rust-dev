@@ -1,0 +1,4 @@
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+cust = "0.8"
+opencl3 = { version = "0.7", feature = ["opencl"] }
